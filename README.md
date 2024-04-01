@@ -1,1 +1,1 @@
-IaC for Cloud Resume Challenge (Azure) - Terraform
+IaC for Cloud Resume Challenge (Azure) using Terraform
