@@ -3,7 +3,7 @@ terraform {
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"
-      version = "~> 3.0.2"
+      version = "~> 3.99.0"
     }
   }
 
@@ -14,11 +14,28 @@ provider "azurerm" {
   features {}
 }
 
+data azurerm_subscription "current_subscription" { }
+output "current_subscription_id" {
+  value = data.azurerm_subscription.current_subscription.id
+}
+
+# ------------------ Resource Group ------------------
 resource "azurerm_resource_group" "rg" {
   name     = "cloudresumerg"
   location = "centralindia"
 }
 
+# ------------------ Key Vault ------------------
+resource "azurerm_key_vault" "kv" {
+  name                = "cloud-resume-kv"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  tenant_id           = data.azurerm_subscription.current_subscription.tenant_id
+  sku_name            = "standard"
+  enable_rbac_authorization = true
+}
+
+# ------------------ Storage Account ------------------
 resource "azurerm_storage_account" "st" {
   name                     = "cloudresumewebstorage"
   resource_group_name      = azurerm_resource_group.rg.name
@@ -31,16 +48,7 @@ resource "azurerm_storage_account" "st" {
   }
 }
 
-resource "azurerm_storage_blob" "blob" {
-  name                   = "index.html"
-  storage_account_name   = azurerm_storage_account.st.name
-  storage_container_name = "$web"
-  type                   = "Block"
-  content_type           = "text/html"
-  source                 = "../cv-website/index.html"
-}
-
-
+# ------------------ CDN Profile ------------------
 resource "azurerm_cdn_profile" "cdn_profile" {
   name                = "cloud-resume-static-cdn"
   location            = azurerm_resource_group.rg.location
@@ -48,7 +56,7 @@ resource "azurerm_cdn_profile" "cdn_profile" {
   sku                 = "Standard_Microsoft"
 }
 
-
+# ------------------ CDN Endpoint ------------------
 resource "azurerm_cdn_endpoint" "endpoint" {
   name                          = "cloud-resume-static"
   profile_name                  = azurerm_cdn_profile.cdn_profile.name
@@ -57,6 +65,7 @@ resource "azurerm_cdn_endpoint" "endpoint" {
   is_http_allowed               = true
   is_https_allowed              = true
   querystring_caching_behaviour = "IgnoreQueryString"
+  origin_host_header = azurerm_storage_account.st.primary_web_host // required for static website on storage account
   is_compression_enabled        = true
   content_types_to_compress = [
     "application/eot",
@@ -113,7 +122,6 @@ resource "azurerm_cdn_endpoint" "endpoint" {
       operator     = "Equal"
       match_values = ["HTTP"]
     }
-
     url_redirect_action {
       redirect_type = "Found"
       protocol      = "Https"
@@ -121,8 +129,68 @@ resource "azurerm_cdn_endpoint" "endpoint" {
   }
 }
 
+# ------------------ Custom Domain ------------------
 resource "azurerm_cdn_endpoint_custom_domain" "custom_domain" {
   name            = "personal-domain"
   cdn_endpoint_id = azurerm_cdn_endpoint.endpoint.id
-  host_name       = "www.mairatariq.me"
+  host_name       = var.custom_domain
+  cdn_managed_https {
+    certificate_type = "Dedicated"
+    protocol_type="ServerNameIndication"
+  }
+  depends_on = [ azurerm_cdn_endpoint.endpoint ]
+}
+
+# ------------------ CosmosDB ------------------
+resource "azurerm_cosmosdb_account" "cosmosdb" {
+  name                = "cloud-resume-cosmosdb"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  offer_type          = "Standard"
+  kind                = "MongoDB"
+
+  enable_automatic_failover = true
+
+  capabilities {
+    name = "EnableMongo"
+  }
+  capabilities {
+    name = "EnableServerless"
+  }
+  consistency_policy {
+    consistency_level       = "Session"
+    max_interval_in_seconds = 5
+    max_staleness_prefix    = 100
+  }
+
+  geo_location {
+    location          = azurerm_resource_group.rg.location
+    failover_priority = 0
+  }
+
+}
+
+# ------------------ CosmosDB Database and Collection ------------------
+resource "azurerm_cosmosdb_mongo_database" "metrics_database" {
+  name                = "cloud-resume-metrics-db"
+  resource_group_name = azurerm_cosmosdb_account.cosmosdb.resource_group_name
+  account_name        = azurerm_cosmosdb_account.cosmosdb.name
+}
+
+resource "azurerm_cosmosdb_mongo_collection" "counts_collection" {
+  name                = "counts"
+  resource_group_name = azurerm_cosmosdb_account.cosmosdb.resource_group_name
+  account_name        = azurerm_cosmosdb_account.cosmosdb.name
+  database_name       = azurerm_cosmosdb_mongo_database.metrics_database.name
+  index {
+    keys   = ["_id"]
+    unique = true
+  }
+}
+
+# ------------------ Key Vault Secret for DB Connection String ------------------
+resource "azurerm_key_vault_secret" "cosmosdb_connection_string" {
+  name         = "cosmosdb-connection-string"
+  value        = azurerm_cosmosdb_account.cosmosdb.primary_mongodb_connection_string
+  key_vault_id = azurerm_key_vault.kv.id
 }
