@@ -194,3 +194,70 @@ resource "azurerm_key_vault_secret" "cosmosdb_connection_string" {
   value        = azurerm_cosmosdb_account.cosmosdb.primary_mongodb_connection_string
   key_vault_id = azurerm_key_vault.kv.id
 }
+
+# ------------------ App Service Plan ------------------
+resource "azurerm_service_plan" "cloud_resume_service_plan" {
+  name                = "cloud-resume-service-plan"
+  resource_group_name = azurerm_resource_group.rg.name
+  # location            = azurerm_resource_group.rg.location
+  location            = "East US" # Due to quota restrictions in Central India
+  os_type             = "Linux"
+  sku_name            = "Y1"
+}
+# ------------------ Function App ------------------
+resource "azurerm_linux_function_app" "cloud_resume_function_app" {
+  name                = "cloud-resume-linux-function-app"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_service_plan.cloud_resume_service_plan.location
+
+  storage_account_name       = azurerm_storage_account.st.name
+  storage_account_access_key = azurerm_storage_account.st.primary_access_key
+  service_plan_id            = azurerm_service_plan.cloud_resume_service_plan.id
+  connection_string {
+    name  = "COSMOSDB_CONNECTION_STRING"
+    type  = "Custom"
+    value = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.cosmosdb_connection_string.id}"
+  }
+  site_config {
+    application_stack {
+      node_version = "20"
+    }
+
+  }
+  functions_extension_version = "~4"
+  app_settings = {
+    COSMOSDB_CONNECTION_STRING = "@Microsoft.KeyVault(SecretUri=${azurerm_key_vault_secret.cosmosdb_connection_string.id})"
+    FUNCTIONS_WORKER_RUNTIME = "node"
+    WEBSITE_NODE_DEFAULT_VERSION = "~20"
+    LinuxFxVersion = "Node|20"
+  }
+  identity {
+    type = "SystemAssigned"
+  }
+}
+
+# # ------------------ Function App Function ------------------
+# resource "azurerm_function_app_function" "counter_function" {
+#   name            = "cloud-resume-counter-function"
+#   function_app_id = azurerm_linux_function_app.cloud_resume_function_app.id
+#   language        = "TypeScript"
+#   config_json = jsonencode({
+#     "bindings" = [
+#       {
+#         "authLevel" = "function"
+#         "direction" = "in"
+#         "methods" = [
+#           "get",
+#           "post",
+#         ]
+#         "name" = "req"
+#         "type" = "httpTrigger"
+#       },
+#       {
+#         "direction" = "out"
+#         "name"      = "$return"
+#         "type"      = "http"
+#       },
+#     ]
+#   })
+# }
